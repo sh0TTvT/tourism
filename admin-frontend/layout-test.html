@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>布局测试</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { 
+      font-family: system-ui, sans-serif; 
+      background: #edf1f5;
+      padding: 20px;
+    }
+    .test-grid {
+      display: grid;
+      grid-template-columns: minmax(280px, 1.12fr) repeat(3, minmax(240px, 1fr));
+      grid-template-rows: repeat(2, minmax(0, 1fr));
+      grid-template-areas:
+        "hero users models services"
+        "hero graph models services";
+      gap: 16px;
+      height: 600px;
+      background: white;
+      padding: 16px;
+    }
+    .card {
+      border: 2px solid #ddd;
+      border-radius: 12px;
+      padding: 16px;
+      background: #f9f9f9;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .card h3 { margin-bottom: 12px; font-size: 18px; }
+    .card-content {
+      flex: 1;
+      overflow-y: auto;
+      background: white;
+      padding: 12px;
+      border-radius: 8px;
+    }
+    .hero { grid-area: hero; background: #e3f2fd; }
+    .users { grid-area: users; background: #f3e5f5; }
+    .models { grid-area: models; background: #e8f5e9; }
+    .services { grid-area: services; background: #fff3e0; }
+    .graph { grid-area: graph; background: #fce4ec; }
+  </style>
+</head>
+<body>
+  <h1 style="margin-bottom: 20px;">布局测试 - Grid Areas</h1>
+  <div class="test-grid">
+    <div class="card hero">
+      <h3>Hero Card</h3>
+      <div class="card-content">
+        <p>这是 hero 区域，占据左侧两行</p>
+        <p style="margin-top: 8px;">Grid area: hero</p>
+      </div>
+    </div>
+    <div class="card users">
+      <h3>Users Card</h3>
+      <div class="card-content">
+        <p>用户列表</p>
+        <div style="margin-top: 8px;">
+          <div style="padding: 8px; background: #f5f5f5; margin: 4px 0; border-radius: 4px;">用户 1</div>
+          <div style="padding: 8px; background: #f5f5f5; margin: 4px 0; border-radius: 4px;">用户 2</div>
+          <div style="padding: 8px; background: #f5f5f5; margin: 4px 0; border-radius: 4px;">用户 3</div>
+        </div>
+      </div>
+    </div>
+    <div class="card models">
+      <h3>Models Card</h3>
+      <div class="card-content">
+        <p>模型列表</p>
+        <div style="margin-top: 8px;">
+          <div style="padding: 8px; background: #f5f5f5; margin: 4px 0; border-radius: 4px;">模型 1</div>
+          <div style="padding: 8px; background: #f5f5f5; margin: 4px 0; border-radius: 4px;">模型 2</div>
+          <div style="padding: 8px; background: #f5f5f5; margin: 4px 0; border-radius: 4px;">模型 3</div>
+          <div style="padding: 8px; background: #f5f5f5; margin: 4px 0; border-radius: 4px;">模型 4</div>
+          <div style="padding: 8px; background: #f5f5f5; margin: 4px 0; border-radius: 4px;">模型 5</div>
+        </div>
+      </div>
+    </div>
+    <div class="card services">
+      <h3>Services Card</h3>
+      <div class="card-content">
+        <p>服务列表</p>
+        <div style="margin-top: 8px;">
+          <div style="padding: 8px; background: #f5f5f5; margin: 4px 0; border-radius: 4px;">服务 1</div>
+          <div style="padding: 8px; background: #f5f5f5; margin: 4px 0; border-radius: 4px;">服务 2</div>
+        </div>
+      </div>
+    </div>
+    <div class="card graph">
+      <h3>Graph Card</h3>
+      <div class="card-content">
+        <p>图谱节点</p>
+        <div style="margin-top: 8px;">
+          <div style="padding: 8px; background: #f5f5f5; margin: 4px 0; border-radius: 4px;">节点 1</div>
+          <div style="padding: 8px; background: #f5f5f5; margin: 4px 0; border-radius: 4px;">节点 2</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div style="margin-top: 20px; padding: 16px; background: white; border-radius: 8px;">
+    <h2 style="margin-bottom: 12px;">说明</h2>
+    <ul style="line-height: 1.8; color: #666;">
+      <li>Hero 卡片占据左侧两行（grid-area: hero）</li>
+      <li>Users 卡片在右上角第一列（grid-area: users）</li>
+      <li>Models 卡片在右上角第二列，占据两行（grid-area: models）</li>
+      <li>Services 卡片在右上角第三列，占据两行（grid-area: services）</li>
+      <li>Graph 卡片在右下角第一列（grid-area: graph）</li>
+    </ul>
+  </div>
+</body>
+</html>

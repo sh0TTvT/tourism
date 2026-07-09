@@ -1,0 +1,1151 @@
+<template>
+  <div class="admin-app">
+    <!-- 使用 AuthGuard 包裹主内容 -->
+    <AuthGuard>
+      <div class="workspace-shell">
+        <!-- 使用 Sidebar 组件 -->
+        <Sidebar />
+
+        <!-- 主面板 -->
+        <main class="main-panel">
+          <!-- 使用 Topbar 组件 -->
+          <Topbar>
+            <template #actions>
+              <button type="button" class="ghost-button" @click="refreshActiveSection">
+                刷新当前页
+              </button>
+            </template>
+          </Topbar>
+
+          <!-- 主内容区 -->
+          <div class="main-content">
+            <OverviewView v-if="activeSection === 'overview'" />
+
+            <UsersView v-else-if="activeSection === 'users'" />
+
+            <ModelsView v-else-if="activeSection === 'models'" />
+
+          <ServicesView v-else-if="activeSection === 'services'" />
+
+          <KnowledgeGraphView v-else />
+          </div>
+        </main>
+
+        
+
+      </div>
+    </AuthGuard>
+
+    <!-- Toast 通知 -->
+    <transition name="toast">
+      <div v-if="notice" class="toast" :class="notice.type">
+        {{ notice.message }}
+      </div>
+    </transition>
+  </div>
+</template>
+
+<script setup>
+import { computed, nextTick, onBeforeUnmount, onMounted, provide, ref, watch } from 'vue';
+import * as d3 from 'd3';
+import { forceSimulation, forceLink, forceManyBody, forceCenter, forceCollide } from 'd3-force';
+import { zoom as d3Zoom, zoomIdentity } from 'd3-zoom';
+import { select as d3Select } from 'd3-selection';
+
+// 导入组件
+import AuthGuard from '@/components/auth/AuthGuard.vue';
+import Sidebar from '@/components/layout/Sidebar.vue';
+import Topbar from '@/components/layout/Topbar.vue';
+import AppIcon from '@/components/common/AppIcon.vue';
+import OverviewView from '@/views/overview/OverviewView.vue';
+import UsersView from '@/views/users/UsersView.vue';
+import ModelsView from '@/views/models/ModelsView.vue';
+import ServicesView from '@/views/services/ServicesView.vue';
+import KnowledgeGraphView from '@/views/knowledge-graph/KnowledgeGraphView.vue';
+
+// 导入 composables
+import { useAuth } from '@/composables/useAuth';
+import { useNavigation } from '@/composables/useNavigation';
+
+// 导入常量和工具
+import { STORAGE_KEYS } from '@/constants/storage';
+import { SECTIONS } from '@/constants/sections';
+import { requestJson } from '@/utils/request';
+
+// 使用 composables
+const { user, logout: authLogout, getToken } = useAuth();
+const { currentSection } = useNavigation();
+
+// 重命名 activeSection 为与 currentSection 同步
+const activeSection = currentSection;
+
+// ========== 工具函数 ==========
+function parseStoredUser() {
+  try {
+    return JSON.parse(localStorage.getItem(STORAGE_KEYS.user) || "null");
+  } catch {
+    return null;
+  }
+}
+
+function parseJsonText(text, fieldName) {
+  const raw = String(text || "").trim();
+  if (!raw) {
+    return {};
+  }
+  try {
+    const data = JSON.parse(raw);
+    if (!data || Array.isArray(data) || typeof data !== "object") {
+      throw new Error();
+    }
+    return data;
+  } catch {
+    throw new Error(`${fieldName} 必须是合法 JSON 对象`);
+  }
+}
+
+function splitCsv(text) {
+  return String(text || "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function stringifyObject(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return "";
+  }
+  return JSON.stringify(value, null, 2);
+}
+
+function createNodeForm(item = null) {
+  return {
+    id: item?.id || null,
+    name: item?.name || "",
+    category: item?.category || "",
+    description: item?.description || "",
+    aliasesText: Array.isArray(item?.aliases) ? item.aliases.join(", ") : "",
+    tagsText: Array.isArray(item?.tags) ? item.tags.join(", ") : "",
+    attributesText: stringifyObject(item?.attributes),
+  };
+}
+
+function createRelationshipForm(nodeId = "", item = null) {
+  return {
+    id: item?.id || null,
+    fromNodeId: item?.fromNodeId || Number(nodeId || 0) || "",
+    toNodeId: item?.toNodeId || "",
+    predicate: item?.predicate || "",
+    description: item?.description || "",
+    weight: item?.weight !== undefined && item?.weight !== null ? item.weight : "",
+    attributesText: stringifyObject(item?.attributes),
+  };
+}
+
+function formatError(payload, fallback = "请求失败，请稍后重试。") {
+  if (!payload) {
+    return fallback;
+  }
+  if (typeof payload === "string") {
+    return payload;
+  }
+  if (typeof payload.message === "string" && payload.message) {
+    return payload.message;
+  }
+  if (payload.fields && typeof payload.fields === "object") {
+    const firstFieldError = Object.values(payload.fields)[0];
+    return firstFieldError || fallback;
+  }
+  return fallback;
+}
+
+const adminUsers = ref([]);
+const adminModels = ref([]);
+const adminServices = ref([]);
+const kgNodes = ref([]);
+const kgRelationships = ref([]);
+
+const loadingModels = ref(false);
+
+const notice = ref(null);
+let noticeTimer = 0;
+
+const activeSectionMeta = computed(
+  () => SECTIONS.find((item) => item.key === activeSection.value) || SECTIONS[0],
+);
+const bannedUsersCount = computed(
+  () => adminUsers.value.filter((item) => item.banned).length,
+);
+const availableModelsCount = computed(
+  () => adminModels.value.filter((item) => item.available).length,
+);
+const availableServicesCount = computed(
+  () => adminServices.value.filter((item) => item.available).length,
+);
+const defaultModelsCount = computed(
+  () => adminModels.value.filter((item) => item.defaultModel).length,
+);
+const problemUsers = computed(() =>
+  adminUsers.value.filter((item) => item.banned || item.role === "ADMIN").slice(0, 5),
+);
+
+function showNotice(message, type = "info") {
+  notice.value = { message, type };
+  window.clearTimeout(noticeTimer);
+  noticeTimer = window.setTimeout(() => {
+    notice.value = null;
+  }, 3200);
+}
+
+function logout() {
+  authLogout(); // 调用 composable 的 logout
+  adminUsers.value = [];
+  adminModels.value = [];
+  adminServices.value = [];
+  showNotice("已退出管理员端。", "success");
+}
+
+function formatDateTime(value) {
+  if (!value) {
+    return "未知时间";
+  }
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(value));
+}
+
+function buildFallbackCover(seed) {
+  const label = String(seed || "旅行内容").trim().slice(0, 2) || "旅行";
+  const svg = `
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 720">
+      <defs>
+        <linearGradient id="g" x1="0%" y1="0%" x2="100%" y2="100%">
+          <stop offset="0%" stop-color="#fb923c" />
+          <stop offset="100%" stop-color="#f97316" />
+        </linearGradient>
+      </defs>
+      <rect width="960" height="720" rx="48" fill="url(#g)" />
+      <circle cx="120" cy="116" r="58" fill="rgba(255,255,255,0.18)" />
+      <path d="M0 550 160 420l170 126 148-106 146 128 336-262v414H0Z" fill="rgba(255,247,237,0.68)" />
+      <text x="64" y="606" fill="#fff7ed" font-size="76" font-family="PingFang SC, Microsoft YaHei, sans-serif" font-weight="700">${label}</text>
+    </svg>
+  `;
+  return `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`;
+}
+
+function handleEscapeClose(event) {
+  if (event.key !== "Escape") {
+    return;
+  }
+}
+
+async function loadOverviewData() {
+  await Promise.all([loadUsers(), loadModels()]);
+}
+
+async function loadUsers() {
+  try {
+    const data = await requestJson("/api/admin/users");
+    adminUsers.value = Array.isArray(data) ? data : [];
+  } catch (error) {
+    showNotice(error.message, "error");
+  }
+}
+
+function openUserSection(item) {
+  activeSection.value = "users";
+}
+
+async function loadModels() {
+  loadingModels.value = true;
+  try {
+    const data = await requestJson("/api/admin/models");
+    adminModels.value = Array.isArray(data) ? data : [];
+  } catch (error) {
+    showNotice(error.message, "error");
+  } finally {
+    loadingModels.value = false;
+  }
+}
+
+// ========== 力导向图方法 ==========
+
+async function initForceGraph() {
+  if (!forceGraphContainer.value) return;
+
+  const container = forceGraphContainer.value;
+  const width = container.clientWidth;
+  const height = container.clientHeight;
+
+  // 清除旧的 SVG
+  d3Select(container).selectAll("svg").remove();
+
+  // 创建 SVG
+  svg = d3Select(container)
+    .append("svg")
+    .attr("width", width)
+    .attr("height", height)
+    .attr("class", "force-graph-svg");
+
+  // 创建缩放行为
+  zoomBehavior = d3Zoom()
+    .scaleExtent([0.1, 4])
+    .on("zoom", (event) => {
+      currentTransform = event.transform;
+      g.attr("transform", event.transform);
+    });
+
+  svg.call(zoomBehavior);
+
+  // 创建主容器组
+  g = svg.append("g");
+
+  // 定义箭头标记
+  svg.append("defs").append("marker")
+    .attr("id", "arrowhead")
+    .attr("viewBox", "0 -5 10 10")
+    .attr("refX", 20)
+    .attr("refY", 0)
+    .attr("markerWidth", 6)
+    .attr("markerHeight", 6)
+    .attr("orient", "auto")
+    .append("path")
+    .attr("d", "M0,-5L10,0L0,5")
+    .attr("fill", "#999");
+
+  // 加载初始数据
+  await loadOverviewGraph();
+}
+
+async function loadOverviewGraph() {
+  loadingGraph.value = true;
+  try {
+    // 重置展开状态
+    expandedCities.value.clear();
+
+    const data = await requestJson("/api/kg/cities");
+    cityNodesCache.value = Array.isArray(data) ? data : [];
+
+    // 转换为力导向图节点格式
+    forceGraphNodes.value = cityNodesCache.value.map(node => ({
+      id: node.id,
+      name: node.name,
+      category: node.category,
+      description: node.description,
+      childCount: node.childCount || 0,
+      type: "city",
+      expanded: false
+    }));
+
+    // 加载城市之间的关系
+    try {
+      const cityRelationships = await requestJson("/api/kg/cities/relationships");
+      forceGraphLinks.value = Array.isArray(cityRelationships)
+        ? cityRelationships.map(rel => ({
+            id: rel.id,
+            source: rel.fromNodeId,
+            target: rel.toNodeId,
+            predicate: rel.predicate,
+            weight: rel.weight || 1
+          }))
+        : [];
+    } catch (error) {
+      console.error("加载城市关系失败:", error);
+      forceGraphLinks.value = [];
+    }
+
+    updateForceGraph();
+  } catch (error) {
+    showNotice(error.message, "error");
+  } finally {
+    loadingGraph.value = false;
+  }
+}
+
+async function expandCityNode(cityId) {
+  if (expandedNodesCache.value[cityId]) {
+    // 使用缓存
+    const cached = expandedNodesCache.value[cityId];
+    mergeExpandedData(cityId, cached);
+    return;
+  }
+
+  loadingGraph.value = true;
+  try {
+    const data = await requestJson(`/api/kg/cities/${cityId}/expand`);
+    expandedNodesCache.value[cityId] = data;
+    mergeExpandedData(cityId, data);
+  } catch (error) {
+    showNotice(error.message, "error");
+  } finally {
+    loadingGraph.value = false;
+  }
+}
+
+function mergeExpandedData(cityId, data) {
+  const childNodes = data.nodes || [];
+  const relationships = data.edges || data.relationships || [];
+
+  console.log(`[展开节点] cityId=${cityId}, 子节点数=${childNodes.length}, 关系数=${relationships.length}`);
+  console.log('[展开节点] 子节点:', childNodes.map(n => n.name));
+  console.log('[展开节点] 关系:', relationships.map(r => `${r.fromNodeId}->${r.toNodeId} (${r.predicate})`));
+
+  // 找到当前城市节点
+  const cityNode = cityNodesCache.value.find(n => n.id === cityId);
+
+  // 清空当前图谱，只保留当前城市节点
+  forceGraphNodes.value = [];
+  forceGraphLinks.value = [];
+
+  // 添加城市节点（标记为已展开）
+  if (cityNode) {
+    forceGraphNodes.value.push({
+      id: cityNode.id,
+      name: cityNode.name,
+      category: cityNode.category,
+      description: cityNode.description,
+      childCount: cityNode.childCount || 0,
+      type: "city",
+      expanded: true
+    });
+  }
+
+  // 添加所有子节点
+  childNodes.forEach(node => {
+    forceGraphNodes.value.push({
+      id: node.id,
+      name: node.name,
+      category: node.category,
+      description: node.description,
+      type: "child",
+      parentCityId: cityId
+    });
+  });
+
+  // 添加所有关系
+  relationships.forEach(rel => {
+    forceGraphLinks.value.push({
+      id: rel.id,
+      source: rel.fromNodeId,
+      target: rel.toNodeId,
+      predicate: rel.predicate,
+      weight: rel.weight || 1
+    });
+  });
+
+  expandedCities.value.add(cityId);
+  updateForceGraph();
+
+  // 展开后自动居中到城市节点
+  nextTick(() => {
+    centerOnNode(cityId);
+  });
+}
+
+function collapseCityNode(cityId) {
+  // 移除该城市的所有子节点和相关关系
+  forceGraphNodes.value = forceGraphNodes.value.filter(n => n.parentCityId !== cityId);
+  forceGraphLinks.value = forceGraphLinks.value.filter(l => {
+    const sourceNode = forceGraphNodes.value.find(n => n.id === l.source.id || n.id === l.source);
+    const targetNode = forceGraphNodes.value.find(n => n.id === l.target.id || n.id === l.target);
+    return sourceNode && targetNode;
+  });
+
+  const cityNode = forceGraphNodes.value.find(n => n.id === cityId);
+  if (cityNode) {
+    cityNode.expanded = false;
+  }
+
+  expandedCities.value.delete(cityId);
+  updateForceGraph();
+}
+
+async function expandChildNode(nodeId) {
+  // 点击子节点时，只显示该节点、其父节点和其子节点
+  loadingGraph.value = true;
+  try {
+    // 获取该节点的详细信息和关系
+    const relationships = await requestJson(`/api/kg/relationships?nodeId=${nodeId}&limit=100`);
+
+    // 找出父节点和子节点
+    const parentIds = new Set();
+    const childIds = new Set();
+
+    relationships.forEach(rel => {
+      if (rel.fromNodeId === nodeId) {
+        childIds.add(rel.toNodeId);
+      }
+      if (rel.toNodeId === nodeId) {
+        parentIds.add(rel.fromNodeId);
+      }
+    });
+
+    // 获取所有相关节点的详细信息
+    const relatedNodeIds = [...parentIds, nodeId, ...childIds];
+    const nodePromises = relatedNodeIds.map(id =>
+      requestJson(`/api/kg/nodes/${id}`).catch(() => null)
+    );
+    const nodes = (await Promise.all(nodePromises)).filter(n => n !== null);
+
+    // 清空当前图谱，只显示相关节点
+    forceGraphNodes.value = nodes.map(node => ({
+      id: node.id,
+      name: node.name,
+      category: node.category,
+      description: node.description,
+      type: parentIds.has(node.id) ? "parent" : (node.id === nodeId ? "current" : "child"),
+      parentNodeId: node.id === nodeId ? null : nodeId
+    }));
+
+    // 只显示相关的关系
+    forceGraphLinks.value = relationships
+      .filter(rel => relatedNodeIds.includes(rel.fromNodeId) && relatedNodeIds.includes(rel.toNodeId))
+      .map(rel => ({
+        id: rel.id,
+        source: rel.fromNodeId,
+        target: rel.toNodeId,
+        predicate: rel.predicate,
+        weight: rel.weight || 1
+      }));
+
+    updateForceGraph();
+
+    // 展开后自动居中到当前节点
+    nextTick(() => {
+      centerOnNode(nodeId);
+    });
+  } catch (error) {
+    console.error("展开子节点失败:", error);
+    showNotice(error.message || "展开子节点失败", "error");
+  } finally {
+    loadingGraph.value = false;
+  }
+}
+
+function updateForceGraph() {
+  if (!g) return;
+
+  // 创建力导向模拟
+  if (simulation) {
+    simulation.stop();
+  }
+
+  simulation = forceSimulation(forceGraphNodes.value)
+    .force("link", forceLink(forceGraphLinks.value)
+      .id(d => d.id)
+      .distance(d => 150))
+    .force("charge", forceManyBody().strength(-300))
+    .force("center", forceCenter(forceGraphContainer.value.clientWidth / 2, forceGraphContainer.value.clientHeight / 2))
+    .force("collide", forceCollide().radius(d => getNodeRadius(d) + 10));
+
+  // 让模拟完全运行完毕，不显示中间过程
+  // 运行固定次数的迭代，然后完全停止
+  for (let i = 0; i < 300; ++i) {
+    simulation.tick();
+  }
+  simulation.stop();
+  simulation = null;  // 完全销毁模拟对象
+
+  // 绘制边
+  const link = g.selectAll(".force-link")
+    .data(forceGraphLinks.value, d => d.id);
+
+  link.exit().remove();
+
+  const linkEnter = link.enter()
+    .append("line")
+    .attr("class", "force-link")
+    .attr("stroke", "#999")
+    .attr("stroke-opacity", 0.6)
+    .attr("stroke-width", 2)
+    .attr("marker-end", "url(#arrowhead)");
+
+  const linkUpdate = linkEnter.merge(link);
+
+  // 绘制节点
+  const node = g.selectAll(".force-node")
+    .data(forceGraphNodes.value, d => d.id);
+
+  node.exit().remove();
+
+  const nodeEnter = node.enter()
+    .append("g")
+    .attr("class", "force-node")
+    .style("cursor", "pointer");  // 添加指针样式，但不添加拖拽
+
+  nodeEnter.append("circle")
+    .attr("r", d => getNodeRadius(d))
+    .attr("fill", d => getNodeColor(d))
+    .attr("stroke", d => getNodeStrokeColor(d))
+    .attr("stroke-width", 2);
+
+  nodeEnter.append("text")
+    .attr("class", "node-label")
+    .attr("text-anchor", "middle")
+    .attr("dy", 4)
+    .attr("fill", "#333")
+    .attr("font-size", "12px")
+    .attr("pointer-events", "none")  // 文本不响应鼠标事件
+    .text(d => shortenLabel(d.name, 10));
+
+  const nodeUpdate = nodeEnter.merge(node);
+
+  // 节点点击事件
+  nodeUpdate.on("click", handleNodeClick);
+  nodeUpdate.on("dblclick", handleNodeDoubleClick);
+
+  // 直接渲染最终位置，不需要 tick 事件
+  linkUpdate
+    .attr("x1", d => d.source.x)
+    .attr("y1", d => d.source.y)
+    .attr("x2", d => d.target.x)
+    .attr("y2", d => d.target.y);
+
+  nodeUpdate.attr("transform", d => `translate(${d.x},${d.y})`);
+}
+
+function getNodeRadius(node) {
+  if (node.type === "city") {
+    // 根据子节点数量调整大小
+    const count = node.childCount || 0;
+    return 20 + Math.min(count * 2, 30);
+  }
+  return 20;
+}
+
+function getNodeColor(node) {
+  if (node.type === "city") {
+    return node.expanded ? "rgba(15, 157, 122, 0.3)" : "rgba(59, 130, 246, 0.3)";
+  }
+  if (node.type === "parent") {
+    return "rgba(156, 163, 175, 0.3)"; // 灰色 - 父节点
+  }
+  if (node.type === "current") {
+    return "rgba(239, 68, 68, 0.3)"; // 红色 - 当前节点
+  }
+  return "rgba(168, 85, 247, 0.3)"; // 紫色 - 子节点
+}
+
+function getNodeStrokeColor(node) {
+  if (node.type === "city") {
+    return node.expanded ? "#0f9d7a" : "#3b82f6";
+  }
+  if (node.type === "parent") {
+    return "#9ca3af"; // 灰色
+  }
+  if (node.type === "current") {
+    return "#ef4444"; // 红色
+  }
+  return "#a855f7"; // 紫色
+}
+
+function handleNodeClick(event, d) {
+  event.stopPropagation();
+
+  if (d.type === "city") {
+    // 点击城市节点：展开或返回概览
+    if (d.expanded) {
+      // 如果城市已展开，返回概览视图
+      loadOverviewGraph();
+    } else {
+      // 如果城市未展开，展开该城市
+      expandCityNode(d.id);
+    }
+  } else {
+    // 点击子节点：展开该节点，只显示它和相关节点
+    expandChildNode(d.id);
+  }
+}
+
+function handleNodeDoubleClick(event, d) {
+  event.stopPropagation();
+  selectNodeForEdit(d.id);
+}
+
+async function selectNodeForEdit(nodeId) {
+  selectedNodeId.value = nodeId;
+
+  // 从缓存或 API 加载节点详情
+  let node = kgNodeMap.value[nodeId];
+  if (!node) {
+    try {
+      node = await requestJson(`/api/kg/nodes/${nodeId}`);
+      cacheNodes([node]);
+    } catch (error) {
+      showNotice(error.message, "error");
+      return;
+    }
+  }
+
+  nodeForm.value = createNodeForm(node);
+  relationshipForm.value = createRelationshipForm(nodeId);
+  await loadRelationships(nodeId);
+}
+
+function dragStarted(event, d) {
+  // 不重启模拟，只固定节点位置
+  d.fx = d.x;
+  d.fy = d.y;
+}
+
+function dragged(event, d) {
+  d.fx = event.x;
+  d.fy = event.y;
+  d.x = event.x;
+  d.y = event.y;
+
+  // 手动更新节点位置
+  d3Select(event.sourceEvent.target.parentNode)
+    .attr("transform", `translate(${d.x},${d.y})`);
+
+  // 手动更新连接到该节点的边
+  g.selectAll(".force-link")
+    .filter(l => l.source.id === d.id || l.target.id === d.id)
+    .attr("x1", l => l.source.x)
+    .attr("y1", l => l.source.y)
+    .attr("x2", l => l.target.x)
+    .attr("y2", l => l.target.y);
+}
+
+function dragEnded(event, d) {
+  // 释放固定位置
+  d.fx = null;
+  d.fy = null;
+}
+
+function switchGraphViewMode(mode) {
+  graphViewMode.value = mode;
+  if (mode === "overview") {
+    loadOverviewGraph();
+  }
+}
+
+function handleGraphSearch() {
+  const query = kgSearch.value.trim().toLowerCase();
+  if (!query) {
+    // 重置高亮
+    if (g) {
+      g.selectAll(".force-node circle")
+        .attr("stroke-width", 2)
+        .attr("stroke", d => getNodeStrokeColor(d));
+    }
+    return;
+  }
+
+  // 查找匹配的节点
+  let matchedNode = null;
+  if (g) {
+    g.selectAll(".force-node")
+      .each(function(d) {
+        const matches = d.name.toLowerCase().includes(query) ||
+                       (d.category && d.category.toLowerCase().includes(query));
+
+        if (matches && !matchedNode) {
+          matchedNode = d;
+        }
+
+        d3Select(this).select("circle")
+          .attr("stroke-width", matches ? 4 : 2)
+          .attr("stroke", matches ? "#f59e0b" : getNodeStrokeColor(d));
+      });
+
+    // 如果找到匹配节点，自动定位到该节点
+    if (matchedNode && svg && zoomBehavior) {
+      const container = forceGraphContainer.value;
+      const width = container.clientWidth;
+      const height = container.clientHeight;
+      const scale = 1.5;
+      const x = -matchedNode.x * scale + width / 2;
+      const y = -matchedNode.y * scale + height / 2;
+
+      svg.transition()
+        .duration(750)
+        .call(
+          zoomBehavior.transform,
+          zoomIdentity.translate(x, y).scale(scale)
+        );
+    }
+  }
+}
+
+function zoomIn() {
+  if (svg && zoomBehavior) {
+    svg.transition().duration(300).call(zoomBehavior.scaleBy, 1.3);
+  }
+}
+
+function zoomOut() {
+  if (svg && zoomBehavior) {
+    svg.transition().duration(300).call(zoomBehavior.scaleBy, 0.7);
+  }
+}
+
+function resetZoom() {
+  if (svg && zoomBehavior) {
+    svg.transition().duration(500).call(zoomBehavior.transform, zoomIdentity);
+  }
+}
+
+function centerOnNode(nodeId) {
+  // 等待节点位置稳定后再居中
+  setTimeout(() => {
+    const node = forceGraphNodes.value.find(n => n.id === nodeId);
+    if (node && svg && zoomBehavior && forceGraphContainer.value) {
+      const container = forceGraphContainer.value;
+      const width = container.clientWidth;
+      const height = container.clientHeight;
+      const scale = 1.0;
+      const x = -node.x * scale + width / 2;
+      const y = -node.y * scale + height / 2;
+
+      svg.transition()
+        .duration(750)
+        .call(
+          zoomBehavior.transform,
+          zoomIdentity.translate(x, y).scale(scale)
+        );
+    }
+  }, 500);
+}
+
+function restartSimulation() {
+  // 重新运行布局算法
+  updateForceGraph();
+}
+
+// ========== 原有的知识图谱方法 ==========
+
+async function loadNodes() {
+  loadingNodes.value = true;
+  try {
+    const params = new URLSearchParams();
+    if (kgSearch.value.trim()) {
+      params.set("keyword", kgSearch.value.trim());
+    }
+    params.set("limit", "40");
+    const data = await requestJson(`/api/kg/nodes?${params.toString()}`);
+    kgNodes.value = Array.isArray(data) ? data : [];
+    cacheNodes(kgNodes.value);
+    if (selectedNodeId.value) {
+      const matched = kgNodes.value.find((item) => item.id === selectedNodeId.value);
+      if (matched) {
+        nodeForm.value = createNodeForm(matched);
+      } else {
+        selectedNodeId.value = null;
+        nodeForm.value = createNodeForm();
+        kgRelationships.value = [];
+        relationshipForm.value = createRelationshipForm();
+      }
+    }
+  } catch (error) {
+    showNotice(error.message, "error");
+  } finally {
+    loadingNodes.value = false;
+  }
+}
+
+async function selectNode(item) {
+  selectedNodeId.value = item.id;
+  cacheNodes([item]);
+  nodeForm.value = createNodeForm(item);
+  relationshipForm.value = createRelationshipForm(item.id);
+  await loadRelationships(item.id);
+}
+
+async function openKnowledgeSection(item) {
+  activeSection.value = "knowledge";
+  await selectNode(item);
+}
+
+function resetNodeForm() {
+  selectedNodeId.value = null;
+  nodeForm.value = createNodeForm();
+  kgRelationships.value = [];
+  relationshipForm.value = createRelationshipForm();
+}
+
+async function saveNode() {
+  savingNode.value = true;
+  try {
+    const payload = {
+      name: nodeForm.value.name,
+      category: nodeForm.value.category,
+      description: nodeForm.value.description,
+      aliases: splitCsv(nodeForm.value.aliasesText),
+      tags: splitCsv(nodeForm.value.tagsText),
+      attributes: parseJsonText(nodeForm.value.attributesText, "节点扩展属性"),
+    };
+    const url = nodeForm.value.id
+      ? `/api/kg/nodes/${nodeForm.value.id}`
+      : "/api/kg/nodes";
+    const method = nodeForm.value.id ? "PUT" : "POST";
+    const data = await requestJson(url, {
+      method,
+      body: JSON.stringify(payload),
+    });
+    selectedNodeId.value = data.id;
+    cacheNodes([data]);
+    nodeForm.value = createNodeForm(data);
+    await loadNodes();
+    await loadRelationships(data.id);
+    showNotice(nodeForm.value.id ? "节点已保存。" : "节点已创建。", "success");
+  } catch (error) {
+    showNotice(error.message, "error");
+  } finally {
+    savingNode.value = false;
+  }
+}
+
+async function deleteNode() {
+  if (!nodeForm.value.id || !window.confirm("确定删除当前节点吗？")) {
+    return;
+  }
+  try {
+    await requestJson(`/api/kg/nodes/${nodeForm.value.id}`, {
+      method: "DELETE",
+    });
+    resetNodeForm();
+    await loadNodes();
+    showNotice("节点已删除。", "success");
+  } catch (error) {
+    showNotice(error.message, "error");
+  }
+}
+
+async function loadRelationships(nodeId = selectedNodeId.value) {
+  if (!nodeId) {
+    kgRelationships.value = [];
+    return;
+  }
+  loadingRelationships.value = true;
+  try {
+    const data = await requestJson(`/api/kg/relationships?nodeId=${nodeId}&limit=40`);
+    kgRelationships.value = Array.isArray(data) ? data : [];
+    await ensureNodesInCache([
+      nodeId,
+      ...kgRelationships.value.flatMap((item) => [item.fromNodeId, item.toNodeId]),
+    ]);
+    if (relationshipForm.value.id) {
+      const matched = kgRelationships.value.find(
+        (item) => item.id === relationshipForm.value.id,
+      );
+      if (matched) {
+        relationshipForm.value = createRelationshipForm(nodeId, matched);
+      }
+    }
+  } catch (error) {
+    showNotice(error.message, "error");
+  } finally {
+    loadingRelationships.value = false;
+  }
+}
+
+function resetRelationshipForm() {
+  relationshipForm.value = createRelationshipForm(selectedNodeId.value || "");
+}
+
+function applyRelationship(item) {
+  relationshipForm.value = createRelationshipForm(selectedNodeId.value || "", item);
+}
+
+function selectGraphRelationship(relationshipId) {
+  const matched = kgRelationships.value.find((item) => item.id === relationshipId);
+  if (matched) {
+    applyRelationship(matched);
+  }
+}
+
+async function focusGraphNode(nodeId) {
+  if (!nodeId) {
+    return;
+  }
+  if (nodeId === selectedNodeId.value) {
+    return;
+  }
+  let node = kgNodeMap.value[nodeId];
+  if (!node) {
+    try {
+      node = await requestJson(`/api/kg/nodes/${nodeId}`);
+      cacheNodes([node]);
+    } catch (error) {
+      showNotice(error.message, "error");
+      return;
+    }
+  }
+  await selectNode(node);
+}
+
+async function saveRelationship() {
+  if (!relationshipForm.value.fromNodeId || !relationshipForm.value.toNodeId) {
+    showNotice("起点和终点节点 ID 不能为空。", "error");
+    return;
+  }
+  savingRelationship.value = true;
+  try {
+    const attributes = parseJsonText(
+      relationshipForm.value.attributesText,
+      "关系扩展属性",
+    );
+    const createPayload = {
+      fromNodeId: Number(relationshipForm.value.fromNodeId),
+      toNodeId: Number(relationshipForm.value.toNodeId),
+      predicate: relationshipForm.value.predicate,
+      description: relationshipForm.value.description,
+      weight:
+        relationshipForm.value.weight === "" ? null : Number(relationshipForm.value.weight),
+      attributes,
+    };
+
+    const updatePayload = {
+      predicate: relationshipForm.value.predicate,
+      description: relationshipForm.value.description,
+      weight:
+        relationshipForm.value.weight === "" ? null : Number(relationshipForm.value.weight),
+      attributes,
+    };
+
+    const url = relationshipForm.value.id
+      ? `/api/kg/relationships/${relationshipForm.value.id}`
+      : "/api/kg/relationships";
+    const method = relationshipForm.value.id ? "PUT" : "POST";
+    const data = await requestJson(url, {
+      method,
+      body: JSON.stringify(relationshipForm.value.id ? updatePayload : createPayload),
+    });
+    relationshipForm.value = createRelationshipForm(selectedNodeId.value || "", data);
+    await loadRelationships(selectedNodeId.value || relationshipForm.value.fromNodeId);
+    showNotice(
+      relationshipForm.value.id ? "关系已保存。" : "关系已创建。",
+      "success",
+    );
+  } catch (error) {
+    showNotice(error.message, "error");
+  } finally {
+    savingRelationship.value = false;
+  }
+}
+
+async function deleteRelationship() {
+  if (!relationshipForm.value.id || !window.confirm("确定删除当前关系吗？")) {
+    return;
+  }
+  try {
+    await requestJson(`/api/kg/relationships/${relationshipForm.value.id}`, {
+      method: "DELETE",
+    });
+    resetRelationshipForm();
+    await loadRelationships();
+    showNotice("关系已删除。", "success");
+  } catch (error) {
+    showNotice(error.message, "error");
+  }
+}
+
+async function refreshActiveSection() {
+  if (activeSection.value === "overview") {
+    await loadOverviewData();
+    return;
+  }
+  if (activeSection.value === "users") {
+    await loadUsers();
+    return;
+  }
+  if (activeSection.value === "models") {
+    await loadModels();
+    return;
+  }
+  await Promise.all([loadNodes(), loadRelationships()]);
+}
+
+async function goToSection(section) {
+  activeSection.value = section;
+  if (section === "users" && !adminUsers.value.length) {
+    await loadUsers();
+  } else if (section === "models" && !adminModels.value.length) {
+    await loadModels();
+  } else if (section === "knowledge" && !kgNodes.value.length) {
+    await loadNodes();
+  }
+}
+
+// ========== 为子组件提供共享状态和方法 ==========
+provide("adminUsers", adminUsers);
+provide("adminModels", adminModels);
+provide("adminServices", adminServices);
+provide("kgNodes", kgNodes);
+provide("kgRelationships", kgRelationships);
+provide("bannedUsersCount", bannedUsersCount);
+provide("availableModelsCount", availableModelsCount);
+provide("availableServicesCount", availableServicesCount);
+provide("defaultModelsCount", defaultModelsCount);
+provide("problemUsers", problemUsers);
+provide("goToSection", goToSection);
+provide("openUserSection", openUserSection);
+provide("openKnowledgeSection", openKnowledgeSection);
+provide("showNotice", showNotice);
+provide("requestJson", requestJson);
+provide("formatDateTime", formatDateTime);
+provide("loadModels", loadModels);
+provide("loadNodes", loadNodes);
+provide("saveNode", saveNode);
+provide("deleteNode", deleteNode);
+provide("loadRelationships", loadRelationships);
+provide("saveRelationship", saveRelationship);
+provide("deleteRelationship", deleteRelationship);
+
+// 知识图谱相关状态
+provide("kgSearch", kgSearch);
+provide("selectedNodeId", selectedNodeId);
+provide("nodeForm", nodeForm);
+provide("relationshipForm", relationshipForm);
+provide("forceGraphNodes", forceGraphNodes);
+provide("forceGraphLinks", forceGraphLinks);
+provide("loadingGraph", loadingGraph);
+provide("forceGraphContainer", forceGraphContainer);
+provide("savingNode", savingNode);
+provide("savingRelationship", savingRelationship);
+
+// 知识图谱相关方法
+provide("handleGraphSearch", handleGraphSearch);
+provide("zoomIn", zoomIn);
+provide("zoomOut", zoomOut);
+provide("resetZoom", resetZoom);
+provide("restartSimulation", restartSimulation);
+provide("loadOverviewGraph", loadOverviewGraph);
+provide("resetNodeForm", resetNodeForm);
+provide("resetRelationshipForm", resetRelationshipForm);
+provide("applyRelationship", applyRelationship);
+provide("relationSummary", relationSummary);
+
+// 监听 currentSection 变化，触发数据加载
+watch(currentSection, async (newSection, oldSection) => {
+  if (newSection === oldSection) return;
+
+  if (newSection === 'overview') {
+    await loadOverviewData();
+  } else if (newSection === 'users' && !adminUsers.value.length) {
+    await loadUsers();
+  } else if (newSection === 'models' && !adminModels.value.length) {
+    await loadModels();
+  } else if (newSection === 'knowledge') {
+    if (!kgNodes.value.length) {
+      await loadNodes();
+    }
+    // 初始化力导向图
+    await new Promise(resolve => setTimeout(resolve, 100));
+    await initForceGraph();
+  }
+});
+
+onMounted(() => {
+  window.addEventListener("keydown", handleEscapeClose);
+});
+
+onBeforeUnmount(() => {
+  window.removeEventListener("keydown", handleEscapeClose);
+});
+
+</script>

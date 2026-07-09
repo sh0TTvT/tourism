@@ -1,0 +1,63 @@
+# Java/Maven
+target/
+*.class
+*.jar
+*.war
+*.ear
+*.iml
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# 前端构建产物
+dist/
+dist-ssr/
+*.local
+.vite/
+.cache/
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 环境变量和配置
+.env
+.env.local
+.env.*.local
+
+# 日志
+*.log
+logs/
+
+# 项目特定
+/data/
+/output/
+/tmp/
+.claude/
+graphify-out/
+
+# 临时文件
+*.tmp
+*.bak
+*.swp
+.mcp.json

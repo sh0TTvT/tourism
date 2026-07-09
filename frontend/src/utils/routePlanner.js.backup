@@ -1,0 +1,655 @@
+function clamp(value, min, max) {
+  return Math.min(Math.max(value, min), max);
+}
+
+function toNumberOrNull(value) {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+  const num = Number(value);
+  return Number.isFinite(num) ? num : null;
+}
+
+function formatLocalDate(date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function todayLocalDateString() {
+  return formatLocalDate(new Date());
+}
+
+function parseDate(value) {
+  if (!value) {
+    return null;
+  }
+  const date = new Date(`${value}T00:00:00`);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function addDaysToDate(value, days) {
+  const date = parseDate(value);
+  if (!date) {
+    return "";
+  }
+  date.setDate(date.getDate() + days);
+  return formatLocalDate(date);
+}
+
+function calculateRouteDays(startDate, endDate, fallbackDays = 3) {
+  const start = parseDate(startDate);
+  const end = parseDate(endDate);
+  if (!start || !end) {
+    return clamp(Number(fallbackDays) || 3, 1, 14);
+  }
+  const diff = Math.round((end.getTime() - start.getTime()) / 86400000) + 1;
+  return clamp(diff, 1, 14);
+}
+
+function normalizeRouteDateRange(overrides = {}) {
+  const days = clamp(Number(overrides.days) || 3, 1, 14);
+  const startDate = parseDate(overrides.startDate)
+    ? String(overrides.startDate)
+    : todayLocalDateString();
+  let endDate = parseDate(overrides.endDate)
+    ? String(overrides.endDate)
+    : addDaysToDate(startDate, days - 1);
+
+  const start = parseDate(startDate);
+  const end = parseDate(endDate);
+  const rawDays = start && end ? Math.round((end.getTime() - start.getTime()) / 86400000) + 1 : days;
+  const normalizedDays = clamp(rawDays, 1, 14);
+  if (rawDays !== normalizedDays) {
+    endDate = addDaysToDate(startDate, normalizedDays - 1);
+  }
+  return {
+    startDate,
+    endDate,
+    days: normalizedDays,
+  };
+}
+
+function normalizeTips(tips) {
+  if (!Array.isArray(tips)) {
+    return [];
+  }
+  return tips
+    .map((item) => String(item || "").trim())
+    .filter(Boolean);
+}
+
+function normalizeRoutePoints(points, totalDays) {
+  const days = clamp(Number(totalDays) || 1, 1, 14);
+  const normalized = Array.isArray(points)
+    ? points.map((point, index) => ({
+        day: clamp(Number(point?.day) || 1, 1, days),
+        order: clamp(Number(point?.order) || index + 1, 1, 999),
+        name: String(point?.name || ""),
+        description: String(point?.description || ""),
+        latitude: toNumberOrNull(point?.latitude),
+        longitude: toNumberOrNull(point?.longitude),
+      }))
+    : [];
+
+  const grouped = new Map();
+  normalized
+    .sort((left, right) => left.day - right.day || left.order - right.order)
+    .forEach((point) => {
+      if (!grouped.has(point.day)) {
+        grouped.set(point.day, []);
+      }
+      grouped.get(point.day).push(point);
+    });
+
+  const result = [];
+  [...grouped.keys()]
+    .sort((left, right) => left - right)
+    .forEach((day) => {
+      grouped.get(day).forEach((point, index) => {
+        result.push({
+          ...point,
+          day,
+          order: index + 1,
+        });
+      });
+    });
+  return result;
+}
+
+function createRouteEditor(overrides = {}, preferences = {}) {
+  const dateRange = normalizeRouteDateRange(overrides);
+  const nextDays = dateRange.days;
+  return {
+    routePlanId: overrides.routePlanId ?? null,
+    conversationId: overrides.conversationId ?? null,
+    title: overrides.title || "",
+    summary: overrides.summary || "",
+    destination: overrides.destination || "",
+    startDate: dateRange.startDate,
+    endDate: dateRange.endDate,
+    days: nextDays,
+    interests: overrides.interests ?? preferences.interestTags ?? "",
+    budget: overrides.budget ?? preferences.budgetPreference ?? "",
+    departure: overrides.departure ?? preferences.preferredDeparture ?? "",
+    points: normalizeRoutePoints(overrides.points || [], nextDays),
+    tips: normalizeTips(overrides.tips || []),
+    createdAt: overrides.createdAt || null,
+    updatedAt: overrides.updatedAt || null,
+  };
+}
+
+function serializeRouteEditor(editor) {
+  const dateRange = normalizeRouteDateRange(editor);
+  return JSON.stringify({
+    title: String(editor?.title || "").trim(),
+    summary: String(editor?.summary || "").trim(),
+    destination: String(editor?.destination || "").trim(),
+    startDate: dateRange.startDate,
+    endDate: dateRange.endDate,
+    days: dateRange.days,
+    interests: String(editor?.interests || "").trim(),
+    budget: String(editor?.budget || "").trim(),
+    departure: String(editor?.departure || "").trim(),
+    tips: normalizeTips(editor?.tips),
+    points: normalizeRoutePoints(editor?.points || [], editor?.days).map((point) => ({
+      ...point,
+      name: point.name.trim(),
+      description: point.description.trim(),
+    })),
+  });
+}
+
+const chineseDayMap = {
+  一: 1,
+  二: 2,
+  两: 2,
+  三: 3,
+  四: 4,
+  五: 5,
+  六: 6,
+  七: 7,
+  八: 8,
+  九: 9,
+  十: 10,
+  十一: 11,
+  十二: 12,
+  十三: 13,
+  十四: 14,
+};
+
+function extractDays(text) {
+  const source = String(text || "");
+  console.log("[DEBUG] extractDays - input text:", source);
+  const digitMatch = source.match(/(\d{1,2})\s*[天日]/);
+  console.log("[DEBUG] extractDays - digitMatch:", digitMatch);
+  if (digitMatch) {
+    const days = clamp(Number(digitMatch[1]) || 3, 1, 14);
+    console.log("[DEBUG] extractDays - 数字匹配成功，返回:", days);
+    return days;
+  }
+  const chineseMatch = source.match(/([一二两三四五六七八九十]{1,3})\s*[天日]/);
+  console.log("[DEBUG] extractDays - chineseMatch:", chineseMatch);
+  if (chineseMatch) {
+    const days = clamp(chineseDayMap[chineseMatch[1]] || 3, 1, 14);
+    console.log("[DEBUG] extractDays - 中文匹配成功，返回:", days);
+    return days;
+  }
+  console.log("[DEBUG] extractDays - 未匹配到天数，返回默认值: 3");
+  return 3;
+}
+
+function sanitizeDestination(value) {
+  const cleaned = String(value || "")
+    .trim()
+    .replace(/^(一个|一次|一场|适合[^的]{0,8}的)/, "")
+    .replace(/(旅游|旅行|自由行|周末游|游|之旅|攻略)$/, "")
+    .trim();
+  if (!cleaned || cleaned.length > 18) {
+    return "";
+  }
+  if (/预算|安排|年轻人|学生党|情侣|亲子|路线|行程|适合/.test(cleaned)) {
+    return "";
+  }
+  return cleaned;
+}
+
+function extractDestination(text) {
+  const source = String(text || "");
+  console.log("[DEBUG] extractDestination 输入文本:", source.substring(0, 200));
+  const patterns = [
+    /去([A-Za-z\u4e00-\u9fa5·]{2,12})(?=(?:玩|旅游|旅行|自由行|度假|[一二两三四五六七八九十0-9]{1,3}[天日]))/,
+    /到([A-Za-z\u4e00-\u9fa5·]{2,12})(?=(?:玩|旅游|旅行|自由行|度假|[一二两三四五六七八九十0-9]{1,3}[天日]))/,
+    /在([A-Za-z\u4e00-\u9fa5·]{2,12})(?=(?:玩|旅游|旅行|自由行|度假))/,
+    /(?:帮我|帮忙|请)(?:安排|规划|设计|制定)([A-Za-z\u4e00-\u9fa5·]{2,12}?)(?=(?:周末|[一二两三四五六七八九十0-9]{1,3}[天日]|旅游|旅行|游|行程))/,
+    /([A-Za-z\u4e00-\u9fa5·]{2,12}?)(?:[一二两三四五六七八九十0-9]{1,3}(?:天|日)(?:游|旅游|旅行|自由行|行程|计划))/,
+    /([A-Za-z\u4e00-\u9fa5·]{2,12})(?=周末游)/,
+  ];
+
+  for (let i = 0; i < patterns.length; i++) {
+    const pattern = patterns[i];
+    const match = source.match(pattern);
+    if (match) console.log("[DEBUG] Pattern", i, "匹配:", match[0], "提取:", match[1]);
+    const destination = sanitizeDestination(match?.[1]);
+    if (destination) {
+      return destination;
+    }
+  }
+  console.log("[DEBUG] extractDestination 未匹配到目的地");
+  return "";
+}
+
+function extractBudget(text, defaultBudget = "") {
+  const source = String(text || "");
+  if (/预算有限|省钱|学生党|穷游|经济/.test(source)) {
+    return "经济型";
+  }
+  if (/高端|豪华|品质|奢华/.test(source)) {
+    return "品质型";
+  }
+  if (/中等|适中|舒适/.test(source)) {
+    return "舒适型";
+  }
+  return defaultBudget;
+}
+
+function extractInterests(text) {
+  const source = String(text || "");
+  const keywords = [
+    "美食",
+    "摄影",
+    "拍照",
+    "夜景",
+    "咖啡",
+    "城市漫步",
+    "亲子",
+    "情侣",
+    "博物馆",
+    "历史",
+    "自然",
+    "徒步",
+    "海边",
+    "购物",
+    "乐园",
+    "温泉",
+    "古镇",
+    "艺术",
+  ];
+  const matches = keywords.filter((keyword) => source.includes(keyword));
+  return matches.join(", ");
+}
+
+function extractDeparture(text, defaultDeparture = "") {
+  const source = String(text || "");
+  const patterns = [
+    /从([A-Za-z\u4e00-\u9fa5·]{2,18})出发/,
+    /([A-Za-z\u4e00-\u9fa5·]{2,18})出发/,
+  ];
+  for (const pattern of patterns) {
+    const match = source.match(pattern);
+    const departure = sanitizeDestination(match?.[1]);
+    if (departure) {
+      return departure;
+    }
+  }
+  return defaultDeparture;
+}
+
+function chineseNumberToInt(value) {
+  const text = String(value || "");
+  if (chineseDayMap[text]) {
+    return chineseDayMap[text];
+  }
+  if (text.length === 2 && text.startsWith("十")) {
+    return 10 + (chineseDayMap[text[1]] || 0);
+  }
+  if (text.length === 2 && text.endsWith("十")) {
+    return (chineseDayMap[text[0]] || 1) * 10;
+  }
+  if (text.includes("十")) {
+    const [left, right] = text.split("十");
+    return (chineseDayMap[left] || 1) * 10 + (chineseDayMap[right] || 0);
+  }
+  return null;
+}
+
+function normalizeDateCandidate(year, month, day) {
+  const currentYear = new Date().getFullYear();
+  const date = new Date(Number(year) || currentYear, Number(month) - 1, Number(day));
+  if (
+    Number.isNaN(date.getTime()) ||
+    date.getMonth() !== Number(month) - 1 ||
+    date.getDate() !== Number(day)
+  ) {
+    return "";
+  }
+  return formatLocalDate(date);
+}
+
+function extractDateRange(text, fallbackDays = 3) {
+  const source = String(text || "");
+  const fullRange = source.match(
+    /(\d{4})[年/.-](\d{1,2})[月/.-](\d{1,2})日?\s*(?:-|至|到|~|—|--)\s*(?:(\d{4})[年/.-])?(\d{1,2})[月/.-](\d{1,2})日?/,
+  );
+  if (fullRange) {
+    const startDate = normalizeDateCandidate(fullRange[1], fullRange[2], fullRange[3]);
+    const endDate = normalizeDateCandidate(
+      fullRange[4] || fullRange[1],
+      fullRange[5],
+      fullRange[6],
+    );
+    if (startDate && endDate) {
+      return { startDate, endDate };
+    }
+  }
+
+  const shortRange = source.match(
+    /(\d{1,2})月(\d{1,2})日?\s*(?:-|至|到|~|—|--)\s*(\d{1,2})月(\d{1,2})日?/,
+  );
+  if (shortRange) {
+    const startDate = normalizeDateCandidate(null, shortRange[1], shortRange[2]);
+    const endDate = normalizeDateCandidate(null, shortRange[3], shortRange[4]);
+    if (startDate && endDate) {
+      return { startDate, endDate };
+    }
+  }
+
+  const singleDate = source.match(/(?:(\d{4})[年/.-])?(\d{1,2})[月/.-](\d{1,2})日?/);
+  if (singleDate) {
+    const startDate = normalizeDateCandidate(singleDate[1], singleDate[2], singleDate[3]);
+    if (startDate) {
+      return { startDate, endDate: addDaysToDate(startDate, clamp(fallbackDays, 1, 14) - 1) };
+    }
+  }
+  return {};
+}
+
+function parseDayNumber(line) {
+  const source = String(line || "");
+  const digitMatch = source.match(/(?:Day|DAY|day|D)\s*([0-9]{1,2})|第\s*([0-9]{1,2})\s*[天日]/);
+  if (digitMatch) {
+    return clamp(Number(digitMatch[1] || digitMatch[2]), 1, 14);
+  }
+  const chineseMatch = source.match(/第\s*([一二两三四五六七八九十]{1,3})\s*[天日]/);
+  if (chineseMatch) {
+    return clamp(chineseNumberToInt(chineseMatch[1]) || 1, 1, 14);
+  }
+  return null;
+}
+
+function cleanupRouteLine(line) {
+  return String(line || "")
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+    .replace(/[*_`~]/g, "")
+    .replace(/^\s{0,3}#{1,6}\s*/, "")
+    .replace(/^\s*[-*•]\s*/, "")
+    .replace(/^\s*\d+[.)、]\s*/, "")
+    .trim();
+}
+
+function normalizeRoutePointNameText(value) {
+  let text = String(value || "")
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+    .replace(/[*_`~#>]/g, "")
+    .replace(/（[^）]{0,30}）|\([^)]{0,30}\)/g, "")
+    .replace(/^\s*[-*•\d.)、]+/, "")
+    .trim();
+
+  text = text
+    .replace(/^(?:用户|助手)\s*[：:]\s*/, "")
+    .replace(/^(上午|中午|下午|晚上|早上|傍晚|夜间|夜游|早餐|午餐|晚餐|第[一二两三四五六七八九十0-9]+站)\s*[：:、-]?/, "")
+    .replace(/^(?:可以|可|建议|推荐|适合|优先|不妨|最好|还能|还可以)?\s*(?:前往|抵达|游览|参观|打卡|逛|去|到|安排|体验|品尝|入住)\s*/, "")
+    .replace(/^(?:可以|可|建议|推荐|适合|优先|不妨|最好|还能|还可以)\s*/, "")
+    .trim();
+
+  text = text.split(/[，,。；;：:]/)[0] || text;
+  text = text.split(/\s+(?:附近|周边|区域|片区)/)[0] || text;
+  text = text
+    .replace(/(?:进行)?(?:游览|参观|打卡|拍照|用餐|午餐|晚餐|早餐|自由活动|附近|周边|游玩|散步|漫步|闲逛|逛吃|吃美食|美食|看夜景|夜景|赏夜景|看展|购物|休息|停留).*$/, "")
+    .replace(/^(?:可以|可|建议|推荐|适合|前往|去|到)\s*/, "")
+    .trim();
+  if (!text || text.length < 2 || text.length > 30) {
+    return "";
+  }
+  if (/^(上午|中午|下午|晚上|早上|傍晚|夜间|自由活动|酒店|住宿|交通|高铁|飞机|地铁|公交|景点|地点|地方)$/.test(text)) {
+    return "";
+  }
+  return text;
+}
+
+function extractPointName(fragment) {
+  return normalizeRoutePointNameText(fragment);
+}
+
+function buildPointDescription(label, fragment) {
+  const content = String(fragment || "").trim();
+  if (!content) {
+    return label ? `${label}安排游览。` : "根据现场情况安排游览。";
+  }
+  return label ? `${label}：${content}` : content;
+}
+
+function extractPointFragments(line) {
+  const cleaned = cleanupRouteLine(line);
+  const fragments = [];
+  const timePattern = /(早上|上午|中午|下午|傍晚|晚上|夜间|夜游|早餐|午餐|晚餐)\s*[：:]\s*([^；;。]+)/g;
+  let match;
+  while ((match = timePattern.exec(cleaned)) !== null) {
+    fragments.push({ label: match[1], text: match[2] });
+  }
+  if (fragments.length) {
+    return fragments;
+  }
+
+  if (/(?:→|->)/.test(cleaned)) {
+    return cleaned
+      .split(/\s*(?:→|->|—|-{2,})\s*/)
+      .map((item) => ({ label: "", text: item }))
+      .filter((item) => item.text.trim());
+  }
+
+  if (/^(早上|上午|中午|下午|傍晚|晚上|夜间|夜游|早餐|午餐|晚餐|第[一二两三四五六七八九十0-9]+站)/.test(cleaned)) {
+    return [{ label: "", text: cleaned }];
+  }
+  return [];
+}
+
+function extractRoutePoints(text, totalDays = null) {
+  const lines = String(text || "").split(/\r?\n/);
+  const points = [];
+  let currentDay = null;
+  const seen = new Set();
+
+  console.log("[DEBUG] extractRoutePoints - 开始解析，总行数:", lines.length);
+
+  lines.forEach((line, index) => {
+    const cleaned = cleanupRouteLine(line);
+    if (!cleaned) {
+      return;
+    }
+    const day = parseDayNumber(cleaned);
+    if (day) {
+      console.log(`[DEBUG] extractRoutePoints - 第${index}行识别到 Day ${day}:`, line);
+      currentDay = day;
+      return;
+    }
+    if (!currentDay) {
+      return;
+    }
+    const fragments = extractPointFragments(cleaned);
+    fragments.forEach((fragment) => {
+      const name = extractPointName(fragment.text);
+      if (!name) {
+        return;
+      }
+      const key = `${currentDay}-${name}`;
+      if (seen.has(key)) {
+        return;
+      }
+      seen.add(key);
+      console.log(`[DEBUG] extractRoutePoints - 提取点位: Day ${currentDay}, 名称: ${name}`);
+      points.push({
+        day: currentDay,
+        order: points.filter((point) => point.day === currentDay).length + 1,
+        name,
+        description: buildPointDescription(fragment.label, fragment.text),
+        latitude: null,
+        longitude: null,
+      });
+    });
+  });
+
+  const maxPointDay = points.reduce((max, point) => Math.max(max, point.day), 1);
+  console.log("[DEBUG] extractRoutePoints - 提取完成，总点位:", points.length, "最大天数:", maxPointDay);
+  return normalizeRoutePoints(points, Math.max(Number(totalDays) || extractDays(text), maxPointDay, 1));
+}
+
+function buildDraftTitle(destination, days) {
+  const target = String(destination || "").trim();
+  if (!target) {
+    return "";
+  }
+  return `${target}${clamp(Number(days) || 1, 1, 14)}日旅行路线`;
+}
+
+function buildDraftSummary(draft) {
+  if (!draft.destination) {
+    return "";
+  }
+  const parts = [
+    draft.departure ? `从${draft.departure}出发` : "",
+    `前往${draft.destination}`,
+    `安排${draft.days}天行程`,
+    draft.interests ? `重点覆盖${draft.interests}` : "覆盖综合游览",
+    draft.budget ? `预算偏好为${draft.budget}` : "",
+  ].filter(Boolean);
+  return `${parts.join("，")}。`;
+}
+
+function buildDefaultTips(points) {
+  const tips = ["出发前确认天气与景点开放时间", "热门景点建议提前预约", "预留机动时间应对交通和排队变化"];
+  if (points.length) {
+    tips.push("地图坐标由地点名称自动解析，保存前建议核对点位位置");
+  }
+  return tips;
+}
+
+function buildRouteDraftFromText(text, conversationId = null, preferences = {}) {
+  const source = String(text || "");
+  console.log("[DEBUG] buildRouteDraftFromText - source:", source);
+  const extractedDays = extractDays(source);
+  console.log("[DEBUG] buildRouteDraftFromText - extractedDays:", extractedDays);
+  const dateRange = extractDateRange(source, extractedDays);
+  const days = dateRange.startDate && dateRange.endDate
+    ? calculateRouteDays(dateRange.startDate, dateRange.endDate, extractedDays)
+    : extractedDays;
+  const destination = extractDestination(source);
+  const points = extractRoutePoints(source, days);
+  const draft = createRouteEditor(
+    {
+      conversationId,
+      destination,
+      days,
+      ...dateRange,
+      interests: extractInterests(source) || preferences.interestTags || "",
+      budget: extractBudget(source, preferences.budgetPreference || ""),
+      departure: extractDeparture(source, preferences.preferredDeparture || ""),
+      points,
+    },
+    preferences,
+  );
+  if (points.length && draft.destination) {
+    draft.title = buildDraftTitle(draft.destination, draft.days);
+    draft.summary = buildDraftSummary(draft);
+    draft.tips = buildDefaultTips(points);
+  }
+  return draft;
+}
+
+function buildRouteDraftFromMessages(messages = [], conversationId = null, preferences = {}) {
+  // 只从用户消息中提取天数，避免匹配到助手回复中的"Day 1"等标记
+  const userMessages = (Array.isArray(messages) ? messages : [])
+    .filter((message) => message?.role === "user")
+    .map((message) => message?.content || "")
+    .join("\n");
+
+  const allMessages = (Array.isArray(messages) ? messages : [])
+    .map((message) => `${message?.role === "user" ? "用户" : "助手"}：${message?.content || ""}`)
+    .join("\n");
+
+  // 从用户消息中提取天数
+  const extractedDays = extractDays(userMessages);
+  console.log("[DEBUG] buildRouteDraftFromMessages - 从用户消息提取天数:", extractedDays);
+
+  // 从完整对话中提取其他信息，但使用用户消息中提取的天数
+  const draft = buildRouteDraftFromText(allMessages, conversationId, preferences);
+  draft.days = extractedDays;
+
+  // 重新计算日期范围
+  const dateRange = extractDateRange(allMessages, extractedDays);
+  if (dateRange.startDate && dateRange.endDate) {
+    draft.startDate = dateRange.startDate;
+    draft.endDate = dateRange.endDate;
+    draft.days = calculateRouteDays(dateRange.startDate, dateRange.endDate, extractedDays);
+  }
+
+  return draft;
+}
+
+function buildRouteSavePayload(editor) {
+  const dateRange = normalizeRouteDateRange(editor);
+  const payload = {
+    title: String(editor?.title || "").trim(),
+    summary: String(editor?.summary || "").trim(),
+    destination: String(editor?.destination || "").trim(),
+    startDate: dateRange.startDate,
+    endDate: dateRange.endDate,
+    days: dateRange.days,
+    interests: String(editor?.interests || "").trim(),
+    budget: String(editor?.budget || "").trim(),
+    departure: String(editor?.departure || "").trim(),
+    tips: normalizeTips(editor?.tips),
+    points: normalizeRoutePoints(editor?.points || [], editor?.days).map((point) => ({
+      day: point.day,
+      order: point.order,
+      name: String(point.name || "").trim(),
+      description: String(point.description || "").trim(),
+      latitude: point.latitude,
+      longitude: point.longitude,
+    })),
+  };
+
+  if (!payload.destination) {
+    throw new Error("请先填写目的地。");
+  }
+  if (!payload.title) {
+    throw new Error("请先填写路线标题。");
+  }
+  if (!payload.summary) {
+    throw new Error("请先填写路线摘要。");
+  }
+  if (!payload.points.length) {
+    throw new Error("请至少保留一个行程点位。");
+  }
+  if (payload.points.some((point) => !point.name)) {
+    throw new Error("请补全所有点位名称。");
+  }
+
+  return payload;
+}
+
+export {
+  buildRouteDraftFromMessages,
+  buildRouteDraftFromText,
+  buildRouteSavePayload,
+  addDaysToDate,
+  calculateRouteDays,
+  clamp,
+  createRouteEditor,
+  normalizeRouteDateRange,
+  normalizeRoutePoints,
+  normalizeTips,
+  serializeRouteEditor,
+  todayLocalDateString,
+};

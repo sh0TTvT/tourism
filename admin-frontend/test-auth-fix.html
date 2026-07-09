@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>认证修复测试</title>
+  <style>
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      max-width: 800px;
+      margin: 40px auto;
+      padding: 20px;
+      background: #f5f5f5;
+    }
+    .section {
+      background: white;
+      padding: 20px;
+      margin: 20px 0;
+      border-radius: 8px;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+    button {
+      background: #0f9d7a;
+      color: white;
+      border: none;
+      padding: 10px 20px;
+      border-radius: 4px;
+      cursor: pointer;
+      margin: 5px;
+    }
+    button:hover {
+      background: #0d8566;
+    }
+    .output {
+      background: #f8f9fa;
+      padding: 15px;
+      border-radius: 4px;
+      margin-top: 10px;
+      font-family: monospace;
+      font-size: 12px;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+    .success { color: #0f9d7a; }
+    .error { color: #ef4444; }
+  </style>
+</head>
+<body>
+  <h1>管理员端认证修复测试</h1>
+
+  <div class="section">
+    <h2>1. 检查当前 localStorage 状态</h2>
+    <button onclick="checkStorage()">检查存储</button>
+    <button onclick="clearStorage()">清除存储</button>
+    <div id="storage-output" class="output"></div>
+  </div>
+
+  <div class="section">
+    <h2>2. 测试 storage 工具</h2>
+    <button onclick="testStorageUtil()">测试 storage.get/set</button>
+    <div id="storage-util-output" class="output"></div>
+  </div>
+
+  <div class="section">
+    <h2>3. 说明</h2>
+    <p>修复内容：将 useAuth.js 中的 localStorage 直接调用改为使用 storage 工具</p>
+    <p><strong>问题原因：</strong></p>
+    <ul>
+      <li>useAuth.js 使用 <code>localStorage.setItem(key, value)</code> 存储 token（纯字符串）</li>
+      <li>request.js 使用 <code>storage.get(key)</code> 读取，会尝试 JSON.parse</li>
+      <li>JSON.parse 纯字符串 token 失败，返回 null</li>
+      <li>请求没有 Authorization header，后端返回 401</li>
+      <li>会话被清除，提示需要登录</li>
+    </ul>
+    <p><strong>解决方案：</strong></p>
+    <ul>
+      <li>统一使用 storage 工具，确保存储和读取方式一致</li>
+      <li>storage.set 会自动 JSON.stringify</li>
+      <li>storage.get 会自动 JSON.parse</li>
+    </ul>
+  </div>
+
+  <script>
+    const STORAGE_KEYS = {
+      token: 'tourismqa_admin_token',
+      user: 'tourismqa_admin_user'
+    };
+
+    const storage = {
+      get(key) {
+        try {
+          const item = localStorage.getItem(key);
+          return item ? JSON.parse(item) : null;
+        } catch (error) {
+          console.error(`Failed to get ${key} from localStorage:`, error);
+          return null;
+        }
+      },
+      set(key, value) {
+        try {
+          localStorage.setItem(key, JSON.stringify(value));
+        } catch (error) {
+          console.error(`Failed to set ${key} in localStorage:`, error);
+        }
+      },
+      remove(key) {
+        try {
+          localStorage.removeItem(key);
+        } catch (error) {
+          console.error(`Failed to remove ${key} from localStorage:`, error);
+        }
+      }
+    };
+
+    function checkStorage() {
+      const output = document.getElementById('storage-output');
+      const token = localStorage.getItem(STORAGE_KEYS.token);
+      const user = localStorage.getItem(STORAGE_KEYS.user);
+
+      output.innerHTML = `
+<strong>原始 localStorage 内容：</strong>
+token: ${token ? token.substring(0, 50) + '...' : 'null'}
+user: ${user ? user.substring(0, 100) + '...' : 'null'}
+
+<strong>使用 storage.get() 读取：</strong>
+token: ${JSON.stringify(storage.get(STORAGE_KEYS.token), null, 2)}
+user: ${JSON.stringify(storage.get(STORAGE_KEYS.user), null, 2)}
+      `;
+    }
+
+    function clearStorage() {
+      storage.remove(STORAGE_KEYS.token);
+      storage.remove(STORAGE_KEYS.user);
+      document.getElementById('storage-output').innerHTML = '<span class="success">✓ 已清除所有认证数据</span>';
+    }
+
+    function testStorageUtil() {
+      const output = document.getElementById('storage-util-output');
+
+      // 测试 token 存储
+      const testToken = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.test';
+      storage.set('test_token', testToken);
+      const retrievedToken = storage.get('test_token');
+
+      // 测试 user 对象存储
+      const testUser = { id: 1, username: 'admin', admin: true };
+      storage.set('test_user', testUser);
+      const retrievedUser = storage.get('test_user');
+
+      // 清理测试数据
+      storage.remove('test_token');
+      storage.remove('test_user');
+
+      const tokenMatch = retrievedToken === testToken;
+      const userMatch = JSON.stringify(retrievedUser) === JSON.stringify(testUser);
+
+      output.innerHTML = `
+<strong>Token 测试：</strong>
+存储: "${testToken}"
+读取: "${retrievedToken}"
+结果: <span class="${tokenMatch ? 'success' : 'error'}">${tokenMatch ? '✓ 通过' : '✗ 失败'}</span>
+
+<strong>User 对象测试：</strong>
+存储: ${JSON.stringify(testUser)}
+读取: ${JSON.stringify(retrievedUser)}
+结果: <span class="${userMatch ? 'success' : '✗ 失败'}">${userMatch ? '✓ 通过' : '✗ 失败'}</span>
+      `;
+    }
+
+    // 页面加载时自动检查
+    window.addEventListener('load', checkStorage);
+  </script>
+</body>
+</html>

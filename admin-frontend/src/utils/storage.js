@@ -1,0 +1,36 @@
+// src/utils/storage.js
+export const storage = {
+  get(key) {
+    try {
+      const item = localStorage.getItem(key)
+      return item ? JSON.parse(item) : null
+    } catch (error) {
+      console.error(`Failed to get ${key} from localStorage:`, error)
+      return null
+    }
+  },
+
+  set(key, value) {
+    try {
+      localStorage.setItem(key, JSON.stringify(value))
+    } catch (error) {
+      console.error(`Failed to set ${key} in localStorage:`, error)
+    }
+  },
+
+  remove(key) {
+    try {
+      localStorage.removeItem(key)
+    } catch (error) {
+      console.error(`Failed to remove ${key} from localStorage:`, error)
+    }
+  },
+
+  clear() {
+    try {
+      localStorage.clear()
+    } catch (error) {
+      console.error('Failed to clear localStorage:', error)
+    }
+  }
+}
